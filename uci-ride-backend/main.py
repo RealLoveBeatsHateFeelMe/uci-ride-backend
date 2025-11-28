@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, time
 from typing import Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Header, Depends, status, Query
@@ -55,11 +55,16 @@ class LoginInput(BaseModel):
 class RideCreate(BaseModel):
     from_location: str
     to_location: str
-    departure_time: datetime
+
+    # --- 新的时间相关字段（全部可选） ---
+    # 只日期 / 只时段 / 日期 + 时段 / 日期 + 具体时间 都可以
+    departure_date: Optional[date] = None
+    time_slot: Optional[str] = None  # "morning" / "noon" / "afternoon" / "evening"
+    departure_time: Optional[time] = None  # 具体几点几分（如 17:00）
+
     total_seats: int
     remaining_seats: int
     gender_preference: str = "any"  # "any" / "female_only" / "male_only"
-    price_per_person: Optional[float] = None
     contact_wechat: str
     notes: Optional[str] = None
 
@@ -69,11 +74,15 @@ class RideOut(BaseModel):
     user_id: int
     from_location: str
     to_location: str
-    departure_time: datetime
+
+    # 对外返回同样的三个时间字段
+    departure_date: Optional[date]
+    time_slot: Optional[str]
+    departure_time: Optional[time]
+
     total_seats: int
     remaining_seats: int
     gender_preference: str
-    price_per_person: Optional[float]
     contact_wechat: str
     notes: Optional[str]
     status: str  # "open" / "closed"
@@ -220,6 +229,10 @@ def read_me(current_user: Dict = Depends(get_current_user)):
 def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_user)):
     """
     创建一条拼车单（需要登录）
+    时间相关字段全部可选：
+    - 只给 departure_date（只有日期）
+    - 只给 time_slot（只有“早上/下午”等）
+    - 都给也可以，前端自己决定怎么展示
     """
     global next_ride_id
 
@@ -228,11 +241,12 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
         "user_id": current_user["id"],
         "from_location": ride_in.from_location,
         "to_location": ride_in.to_location,
+        "departure_date": ride_in.departure_date,
+        "time_slot": ride_in.time_slot,
         "departure_time": ride_in.departure_time,
         "total_seats": ride_in.total_seats,
         "remaining_seats": ride_in.remaining_seats,
         "gender_preference": ride_in.gender_preference,
-        "price_per_person": ride_in.price_per_person,
         "contact_wechat": ride_in.contact_wechat,
         "notes": ride_in.notes,
         "status": "open",
@@ -249,6 +263,7 @@ def list_rides(
 ):
     """
     列出所有开放拼车单，可按出发地/目的地筛选
+    （后续如果要按日期/时段筛选，也可以在这里加参数）
     """
     results: List[RideOut] = []
     for ride in fake_rides_db.values():
