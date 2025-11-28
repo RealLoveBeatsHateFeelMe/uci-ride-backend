@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, date, time
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 
 from fastapi import FastAPI, HTTPException, Header, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,11 +56,12 @@ class RideCreate(BaseModel):
     from_location: str
     to_location: str
 
-    # --- 新的时间相关字段（全部可选） ---
-    # 只日期 / 只时段 / 日期 + 时段 / 日期 + 具体时间 都可以
-    departure_date: Optional[date] = None
-    time_slot: Optional[str] = None  # "morning" / "noon" / "afternoon" / "evening"
-    departure_time: Optional[time] = None  # 具体几点几分（如 17:00）
+    # ---- 时间相关字段：兼容旧版 & 新版 ----
+    # 旧版前端：把 departure_time 当成 datetime 发过来
+    # 新版前端：可以用 departure_date + time_slot + departure_time
+    departure_time: Optional[Union[datetime, time]] = None  # 可以是 datetime 或 time
+    departure_date: Optional[date] = None                   # 只日期
+    time_slot: Optional[str] = None                         # "morning" / "noon" / "afternoon" / "evening"
 
     total_seats: int
     remaining_seats: int
@@ -75,7 +76,7 @@ class RideOut(BaseModel):
     from_location: str
     to_location: str
 
-    # 对外返回同样的三个时间字段
+    # 对前端暴露的新结构：日期 + 时段 + 具体时间
     departure_date: Optional[date]
     time_slot: Optional[str]
     departure_time: Optional[time]
@@ -229,21 +230,38 @@ def read_me(current_user: Dict = Depends(get_current_user)):
 def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_user)):
     """
     创建一条拼车单（需要登录）
-    时间相关字段全部可选：
-    - 只给 departure_date（只有日期）
-    - 只给 time_slot（只有“早上/下午”等）
-    - 都给也可以，前端自己决定怎么展示
+
+    时间兼容策略：
+    - 如果前端只传了一个 departure_time = datetime（老版本行为）：
+        * 如果没有单独传 departure_date，就从 datetime 里自动拆出日期
+        * 再从 datetime 里拆出具体时间（HH:MM:SS）
+    - 如果前端传的是新的字段：
+        * departure_date / time_slot / departure_time 直接使用
     """
     global next_ride_id
+
+    # 归一化日期和时间
+    normalized_date: Optional[date] = ride_in.departure_date
+    normalized_time: Optional[time] = None
+
+    if isinstance(ride_in.departure_time, datetime):
+        dt: datetime = ride_in.departure_time
+        # 如果没单独给日期，就用 datetime 里的日期
+        if normalized_date is None:
+            normalized_date = dt.date()
+        normalized_time = dt.time()
+    else:
+        # departure_time 已经是 time 或 None
+        normalized_time = ride_in.departure_time
 
     ride = {
         "id": next_ride_id,
         "user_id": current_user["id"],
         "from_location": ride_in.from_location,
         "to_location": ride_in.to_location,
-        "departure_date": ride_in.departure_date,
+        "departure_date": normalized_date,
         "time_slot": ride_in.time_slot,
-        "departure_time": ride_in.departure_time,
+        "departure_time": normalized_time,
         "total_seats": ride_in.total_seats,
         "remaining_seats": ride_in.remaining_seats,
         "gender_preference": ride_in.gender_preference,
