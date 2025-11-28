@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, date, time
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Header, Depends, status, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,11 +9,12 @@ import hashlib
 
 app = FastAPI(title="UCI Carpool Backend")
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 开发阶段先全放开，上线再收紧
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware(
+        allow_origins=["*"],  # 开发阶段先全放开，上线再收紧
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 )
 
 # ========= 安全相关设置 =========
@@ -56,12 +57,16 @@ class RideCreate(BaseModel):
     from_location: str
     to_location: str
 
-    # ---- 时间相关字段：兼容旧版 & 新版 ----
-    # 旧版前端：把 departure_time 当成 datetime 发过来
-    # 新版前端：可以用 departure_date + time_slot + departure_time
-    departure_time: Optional[Union[datetime, time]] = None  # 可以是 datetime 或 time
-    departure_date: Optional[date] = None                   # 只日期
-    time_slot: Optional[str] = None                         # "morning" / "noon" / "afternoon" / "evening"
+    # ---- 时间相关字段 ----
+    # 注意：departure_time 先按 str 接收，以兼容：
+    # 1）旧前端：完整 datetime 字符串
+    # 2）新前端：纯时间 "HH:MM"
+    # 3）用户没填：可能是 "" 或根本不带这个字段
+    departure_time: Optional[str] = None
+    # 只日期（可选）：支持“仅日期”这种用法
+    departure_date: Optional[date] = None
+    # 时段（可选）
+    time_slot: Optional[str] = None  # "morning" / "noon" / "afternoon" / "evening"
 
     total_seats: int
     remaining_seats: int
@@ -76,7 +81,7 @@ class RideOut(BaseModel):
     from_location: str
     to_location: str
 
-    # 对前端暴露的新结构：日期 + 时段 + 具体时间
+    # 对外展示用的新结构：日期 + 时段 + 具体时间
     departure_date: Optional[date]
     time_slot: Optional[str]
     departure_time: Optional[time]
@@ -232,11 +237,12 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
     创建一条拼车单（需要登录）
 
     时间兼容策略：
-    - 如果前端只传了一个 departure_time = datetime（老版本行为）：
+    - 如果前端只传了 departure_time = datetime 字符串（老版本行为）：
         * 如果没有单独传 departure_date，就从 datetime 里自动拆出日期
         * 再从 datetime 里拆出具体时间（HH:MM:SS）
     - 如果前端传的是新的字段：
-        * departure_date / time_slot / departure_time 直接使用
+        * departure_date / time_slot / departure_time（"HH:MM"）直接使用
+    - 如果 departure_time 是空字符串 ""，当作没填
     """
     global next_ride_id
 
@@ -244,15 +250,42 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
     normalized_date: Optional[date] = ride_in.departure_date
     normalized_time: Optional[time] = None
 
-    if isinstance(ride_in.departure_time, datetime):
-        dt: datetime = ride_in.departure_time
-        # 如果没单独给日期，就用 datetime 里的日期
-        if normalized_date is None:
-            normalized_date = dt.date()
-        normalized_time = dt.time()
+    raw_time = ride_in.departure_time
+
+    # 1. 如果是空字符串或者 None，就当没填
+    if raw_time is None or str(raw_time).strip() == "":
+        # 不做任何处理，保持 normalized_time = None
+        pass
     else:
-        # departure_time 已经是 time 或 None
-        normalized_time = ride_in.departure_time
+        time_str = str(raw_time).strip()
+
+        parsed = False
+
+        # 2. 先尝试按完整 datetime 解析（兼容老前端可能传的 datetime）
+        try:
+            # 兼容末尾带 "Z" 的情况
+            dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            if normalized_date is None:
+                normalized_date = dt.date()
+            normalized_time = dt.time()
+            parsed = True
+        except Exception:
+            parsed = False
+
+        # 3. 如果不是 datetime，再尝试当纯时间 "HH:MM" 解析
+        if not parsed:
+            try:
+                normalized_time = time.fromisoformat(time_str)
+                parsed = True
+            except Exception:
+                parsed = False
+
+        # 4. 两种都解析不了，就报一个可读的错误
+        if not parsed:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid departure_time format. Use HH:MM or an ISO datetime string.",
+            )
 
     ride = {
         "id": next_ride_id,
