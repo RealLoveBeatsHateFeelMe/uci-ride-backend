@@ -8,13 +8,14 @@ from jose import jwt, JWTError
 import hashlib
 
 app = FastAPI(title="UCI Carpool Backend")
+
+# ✅ 正确的 CORS 写法：把 CORSMiddleware 当“类”传进去，不要加括号
 app.add_middleware(
-    CORSMiddleware(
-        allow_origins=["*"],  # 开发阶段先全放开，上线再收紧
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    CORSMiddleware,
+    allow_origins=["*"],  # 开发阶段先全放开，上线再收紧
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ========= 安全相关设置 =========
@@ -58,15 +59,15 @@ class RideCreate(BaseModel):
     to_location: str
 
     # ---- 时间相关字段 ----
-    # 注意：departure_time 先按 str 接收，以兼容：
+    # departure_time 先按 str 接收，兼容：
     # 1）旧前端：完整 datetime 字符串
     # 2）新前端：纯时间 "HH:MM"
     # 3）用户没填：可能是 "" 或根本不带这个字段
     departure_time: Optional[str] = None
-    # 只日期（可选）：支持“仅日期”这种用法
+    # 只日期（可选）：支持“仅日期”
     departure_date: Optional[date] = None
-    # 时段（可选）
-    time_slot: Optional[str] = None  # "morning" / "noon" / "afternoon" / "evening"
+    # 时段（可选）：morning/noon/afternoon/evening
+    time_slot: Optional[str] = None
 
     total_seats: int
     remaining_seats: int
@@ -81,7 +82,7 @@ class RideOut(BaseModel):
     from_location: str
     to_location: str
 
-    # 对外展示用的新结构：日期 + 时段 + 具体时间
+    # 对前端暴露的新结构：日期 + 时段 + 具体时间
     departure_date: Optional[date]
     time_slot: Optional[str]
     departure_time: Optional[time]
@@ -254,11 +255,9 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
 
     # 1. 如果是空字符串或者 None，就当没填
     if raw_time is None or str(raw_time).strip() == "":
-        # 不做任何处理，保持 normalized_time = None
-        pass
+        pass  # 保持 normalized_time = None
     else:
         time_str = str(raw_time).strip()
-
         parsed = False
 
         # 2. 先尝试按完整 datetime 解析（兼容老前端可能传的 datetime）
@@ -376,3 +375,4 @@ def close_ride(ride_id: int, current_user: Dict = Depends(get_current_user)):
 
     ride["status"] = "closed"
     return RideOut(**ride)
+
