@@ -346,32 +346,63 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
 
 
 
+from fastapi import Query  # 顶部已经有 fastapi 导入的话，补上这一行就好
+
 @app.get("/rides", response_model=List[RideOut])
 def list_rides(
     from_location: Optional[str] = None,
     to_location: Optional[str] = None,
+    departure_date: Optional[date] = Query(None),
+    time_slot: Optional[str] = Query(None),
 ):
     """
-    列出所有开放且未过期的拼车单，可按出发地/目的地筛选
+    列出所有开放拼车单，可按出发地/目的地/日期/时段筛选，并自动过滤过期拼车
     """
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=3)   # 出发时间早于现在 3 小时的，当作过期
+
     results: List[RideOut] = []
+
     for ride in fake_rides_db.values():
-        # 1. 必须是 open
+        # 1. 只保留状态为 open 的
         if ride["status"] != "open":
             continue
 
-        # 2. 自动过滤掉已经过期的（出发时间 + 3 小时之前）
-        if is_ride_expired(ride):
-            continue
+        # 2. 过期自动过滤 + 标记关闭（可选）
+        ride_date: Optional[date] = ride.get("departure_date")
+        ride_time: Optional[time] = ride.get("departure_time")
 
-        # 3. 出发地 / 目的地筛选
+        if ride_date is not None:
+            if ride_time is not None:
+                ride_dt = datetime.combine(ride_date, ride_time)
+            else:
+                # 没具体时间，就认为这天 23:59 之前都算有效
+                ride_dt = datetime.combine(ride_date, time(23, 59))
+
+            if ride_dt < cutoff:
+                # 顺手标记一下状态，避免下次再判断
+                ride["status"] = "closed"
+                continue
+
+        # 3. 出发地 / 目的地 模糊匹配
         if from_location and from_location.lower() not in ride["from_location"].lower():
             continue
         if to_location and to_location.lower() not in ride["to_location"].lower():
             continue
 
+        # 4. 按日期筛选（精确匹配 YYYY-MM-DD）
+        if departure_date and ride_date != departure_date:
+            continue
+
+        # 5. 按时段筛选
+        if time_slot and ride.get("time_slot") != time_slot:
+            continue
+
         results.append(RideOut(**ride))
+
     return results
+
 
 
 @app.get("/rides/{ride_id}", response_model=RideOut)
