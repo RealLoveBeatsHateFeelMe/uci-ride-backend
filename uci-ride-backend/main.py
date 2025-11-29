@@ -313,6 +313,18 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
                 detail="Invalid departure_time format. Use HH:MM or an ISO datetime string.",
             )
 
+    # ---- 这里是“默认现有人数 = 1”的逻辑 ----
+    # 如果前端没有刻意设置剩余座位（remaining == total），
+    # 默认认为司机自己占一个座位
+    if (
+        ride_in.total_seats is not None
+        and ride_in.total_seats > 0
+        and ride_in.remaining_seats == ride_in.total_seats
+    ):
+        normalized_remaining = ride_in.total_seats - 1
+    else:
+        normalized_remaining = ride_in.remaining_seats
+
     ride = {
         "id": next_ride_id,
         "user_id": current_user["id"],
@@ -322,7 +334,7 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
         "time_slot": ride_in.time_slot,
         "departure_time": normalized_time,
         "total_seats": ride_in.total_seats,
-        "remaining_seats": ride_in.remaining_seats,
+        "remaining_seats": normalized_remaining,
         "gender_preference": ride_in.gender_preference,
         "contact_wechat": ride_in.contact_wechat,
         "notes": ride_in.notes,
@@ -331,6 +343,7 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
     fake_rides_db[next_ride_id] = ride
     next_ride_id += 1
     return RideOut(**ride)
+
 
 
 @app.get("/rides", response_model=List[RideOut])
