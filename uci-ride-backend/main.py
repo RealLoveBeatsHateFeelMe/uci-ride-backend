@@ -117,6 +117,33 @@ def get_user_by_email(email: str) -> Optional[Dict]:
     return fake_users_db.get(email.lower())
 
 
+def is_ride_expired(ride: Dict) -> bool:
+    """
+    根据 departure_date / departure_time 判断一条拼车是否已经过期。
+
+    规则：
+    - 没有日期：认为时间待定 -> 不过期
+    - 有日期 + 有具体时间：用日期+时间
+    - 只有日期：默认当天 23:59
+    - 出发时间 + 3 小时 < 当前时间 -> 过期
+    """
+    dep_date: Optional[date] = ride.get("departure_date")
+    if not dep_date:
+        # 没填日期的，时间待定，先不自动下架
+        return False
+
+    dep_time: Optional[time] = ride.get("departure_time")
+    if dep_time is None:
+        # 只有日期，没有具体时间，就认为当天最后一刻
+        dep_dt = datetime.combine(dep_date, time(23, 59))
+    else:
+        dep_dt = datetime.combine(dep_date, dep_time)
+
+    now = datetime.utcnow()
+    # 出发时间 + 3 小时仍早于现在，就算过期
+    return dep_dt + timedelta(hours=3) < now
+
+
 def get_current_user(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
@@ -312,17 +339,24 @@ def list_rides(
     to_location: Optional[str] = None,
 ):
     """
-    列出所有开放拼车单，可按出发地/目的地筛选
-    （后续如果要按日期/时段筛选，也可以在这里加参数）
+    列出所有开放且未过期的拼车单，可按出发地/目的地筛选
     """
     results: List[RideOut] = []
     for ride in fake_rides_db.values():
+        # 1. 必须是 open
         if ride["status"] != "open":
             continue
+
+        # 2. 自动过滤掉已经过期的（出发时间 + 3 小时之前）
+        if is_ride_expired(ride):
+            continue
+
+        # 3. 出发地 / 目的地筛选
         if from_location and from_location.lower() not in ride["from_location"].lower():
             continue
         if to_location and to_location.lower() not in ride["to_location"].lower():
             continue
+
         results.append(RideOut(**ride))
     return results
 
@@ -375,4 +409,3 @@ def close_ride(ride_id: int, current_user: Dict = Depends(get_current_user)):
 
     ride["status"] = "closed"
     return RideOut(**ride)
-
