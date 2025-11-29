@@ -9,7 +9,7 @@ import hashlib
 
 app = FastAPI(title="UCI Carpool Backend")
 
-# ✅ 正确的 CORS 写法：把 CORSMiddleware 当“类”传进去，不要加括号
+# ✅ 正确的 CORS 写法
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 开发阶段先全放开，上线再收紧
@@ -19,7 +19,7 @@ app.add_middleware(
 )
 
 # ========= 安全相关设置 =========
-SECRET_KEY = "CHANGE_THIS_TO_SOMETHING_RANDOM_AND_SECRET"
+SECRET_KEY = "RealLoveBeatsHateFeelMe11/28DayInTheLife"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 天
 
@@ -117,33 +117,6 @@ def get_user_by_email(email: str) -> Optional[Dict]:
     return fake_users_db.get(email.lower())
 
 
-def is_ride_expired(ride: Dict) -> bool:
-    """
-    根据 departure_date / departure_time 判断一条拼车是否已经过期。
-
-    规则：
-    - 没有日期：认为时间待定 -> 不过期
-    - 有日期 + 有具体时间：用日期+时间
-    - 只有日期：默认当天 23:59
-    - 出发时间 + 3 小时 < 当前时间 -> 过期
-    """
-    dep_date: Optional[date] = ride.get("departure_date")
-    if not dep_date:
-        # 没填日期的，时间待定，先不自动下架
-        return False
-
-    dep_time: Optional[time] = ride.get("departure_time")
-    if dep_time is None:
-        # 只有日期，没有具体时间，就认为当天最后一刻
-        dep_dt = datetime.combine(dep_date, time(23, 59))
-    else:
-        dep_dt = datetime.combine(dep_date, dep_time)
-
-    now = datetime.utcnow()
-    # 出发时间 + 3 小时仍早于现在，就算过期
-    return dep_dt + timedelta(hours=3) < now
-
-
 def get_current_user(
     authorization: Optional[str] = Header(None),
     token: Optional[str] = Query(None),
@@ -196,6 +169,7 @@ def read_root():
     return {"message": "UCI Carpool backend is running with simple auth!"}
 
 
+# -------- Auth --------
 @app.post("/auth/register", response_model=UserOut)
 def register(user_in: UserCreate):
     """
@@ -259,6 +233,7 @@ def read_me(current_user: Dict = Depends(get_current_user)):
     )
 
 
+# -------- Rides: 创建 --------
 @app.post("/rides", response_model=RideOut)
 def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_user)):
     """
@@ -313,18 +288,6 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
                 detail="Invalid departure_time format. Use HH:MM or an ISO datetime string.",
             )
 
-    # ---- 这里是“默认现有人数 = 1”的逻辑 ----
-    # 如果前端没有刻意设置剩余座位（remaining == total），
-    # 默认认为司机自己占一个座位
-    if (
-        ride_in.total_seats is not None
-        and ride_in.total_seats > 0
-        and ride_in.remaining_seats == ride_in.total_seats
-    ):
-        normalized_remaining = ride_in.total_seats - 1
-    else:
-        normalized_remaining = ride_in.remaining_seats
-
     ride = {
         "id": next_ride_id,
         "user_id": current_user["id"],
@@ -334,7 +297,7 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
         "time_slot": ride_in.time_slot,
         "departure_time": normalized_time,
         "total_seats": ride_in.total_seats,
-        "remaining_seats": normalized_remaining,
+        "remaining_seats": ride_in.remaining_seats,
         "gender_preference": ride_in.gender_preference,
         "contact_wechat": ride_in.contact_wechat,
         "notes": ride_in.notes,
@@ -345,66 +308,73 @@ def create_ride(ride_in: RideCreate, current_user: Dict = Depends(get_current_us
     return RideOut(**ride)
 
 
+# ---- 辅助函数：用于排序 / 过滤时间 ----
+def _ride_datetime(ride: Dict) -> Optional[datetime]:
+    d = ride.get("departure_date")
+    t = ride.get("departure_time")
+    if d is None:
+        return None
+    if t is None:
+        t = time(0, 0)  # 如果没具体时间，就当成当天 00:00
+    return datetime.combine(d, t)
 
-from fastapi import Query  # 顶部已经有 fastapi 导入的话，补上这一行就好
 
+# -------- Rides: 列表 --------
 @app.get("/rides", response_model=List[RideOut])
 def list_rides(
     from_location: Optional[str] = None,
     to_location: Optional[str] = None,
-    departure_date: Optional[date] = Query(None),
-    time_slot: Optional[str] = Query(None),
+    departure_date: Optional[date] = None,  # 搜索开始日期：这一天及之后
+    time_slot: Optional[str] = None,        # 'morning' | 'noon' | 'afternoon' | 'evening'
 ):
     """
-    列出所有开放拼车单，可按出发地/目的地/日期/时段筛选，并自动过滤过期拼车
+    列出所有开放拼车单：
+
+    - 只显示 status = open 的单
+    - 自动过滤掉已经过期 3 小时以上的单
+    - 如果传了 departure_date：显示“这一天及之后”的所有单
+    - 如果传了 time_slot：只留下对应时段的单
+    - 最后按出发时间从近到远排序
     """
-
     now = datetime.utcnow()
-    cutoff = now - timedelta(hours=3)   # 出发时间早于现在 3 小时的，当作过期
-
-    results: List[RideOut] = []
+    results: List[Dict] = []
 
     for ride in fake_rides_db.values():
-        # 1. 只保留状态为 open 的
         if ride["status"] != "open":
             continue
 
-        # 2. 过期自动过滤 + 标记关闭（可选）
-        ride_date: Optional[date] = ride.get("departure_date")
-        ride_time: Optional[time] = ride.get("departure_time")
+        ride_dt = _ride_datetime(ride)
 
-        if ride_date is not None:
-            if ride_time is not None:
-                ride_dt = datetime.combine(ride_date, ride_time)
-            else:
-                # 没具体时间，就认为这天 23:59 之前都算有效
-                ride_dt = datetime.combine(ride_date, time(23, 59))
+        # ① 自动过滤掉已经过去 3 小时的单
+        if ride_dt is not None and ride_dt < now - timedelta(hours=3):
+            continue
 
-            if ride_dt < cutoff:
-                # 顺手标记一下状态，避免下次再判断
-                ride["status"] = "closed"
-                continue
-
-        # 3. 出发地 / 目的地 模糊匹配
+        # ② 出发地 / 目的地 关键字过滤
         if from_location and from_location.lower() not in ride["from_location"].lower():
             continue
         if to_location and to_location.lower() not in ride["to_location"].lower():
             continue
 
-        # 4. 按日期筛选（精确匹配 YYYY-MM-DD）
-        if departure_date and ride_date != departure_date:
-            continue
+        # ③ 如果用户在前端选了“出发日期”，只保留 >= 该日期的单
+        if departure_date:
+            min_dt = datetime.combine(departure_date, time(0, 0))  # 选中那天的 00:00
+            if ride_dt is None or ride_dt < min_dt:
+                continue
 
-        # 5. 按时段筛选
+        # ④ 时段过滤（早上/中午/下午/晚上）
         if time_slot and ride.get("time_slot") != time_slot:
             continue
 
-        results.append(RideOut(**ride))
+        results.append(ride)
 
-    return results
+    # ⑤ 按出发时间从近到远排序：
+    #    有具体时间的排前面；没时间/没日期的放最后
+    results.sort(key=lambda r: _ride_datetime(r) or datetime.max)
+
+    return [RideOut(**r) for r in results]
 
 
-
+# -------- Rides: 详情 --------
 @app.get("/rides/{ride_id}", response_model=RideOut)
 def get_ride(ride_id: int):
     """
@@ -416,6 +386,7 @@ def get_ride(ride_id: int):
     return RideOut(**ride)
 
 
+# -------- Rides: 改座位 --------
 @app.post("/rides/{ride_id}/decrease_seat", response_model=RideOut)
 def decrease_seat(ride_id: int, current_user: Dict = Depends(get_current_user)):
     """
@@ -439,6 +410,7 @@ def decrease_seat(ride_id: int, current_user: Dict = Depends(get_current_user)):
     return RideOut(**ride)
 
 
+# -------- Rides: 手动关闭 --------
 @app.post("/rides/{ride_id}/close", response_model=RideOut)
 def close_ride(ride_id: int, current_user: Dict = Depends(get_current_user)):
     """
